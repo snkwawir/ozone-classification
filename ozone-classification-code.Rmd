@@ -1,0 +1,549 @@
+---
+title: "Ozone Level Classification"
+author: "Sikem Nkwawir"
+date: "`r format(Sys.time(), '%B %d, %Y')`"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Introduction
+In this project, I aim to classify ozone levels in El Paso, a city known for its significant ozone concentration, using data from 2015 to 2019. The goal is to distinguish between high and low ozone days, a critical task for environmental health, given the detrimental effects of ground-level ozone on humans and ecosystems. I will apply two machine learning techniques, logistic regression and artificial neural networks (ANN) to this binary classification problem. The choice of these methods provides a comparison between a traditional statistical approach and a more complex computational model, potentially offering deeper insights into the patterns and factors influencing ozone levels. This analysis is not only essential for predicting ozone concentrations but also for understanding which model fits better for this dataset and how each model works to form its predictions.
+
+```{r, message=F, warning=F}
+## Importing Libraries Used
+library(caret)
+library(naniar)
+library(glmnet)
+library(cvAUC)
+library(verification)
+library(e1071)
+library(ROCR)
+library(precrec)
+library(ggplot2)
+library(neuralnet)
+```
+
+# Data Collection: Bring in the Data into R 
+In this section, I loaded the dataset into R from a local copy saved on my computer. The first step is to understand the structure of the dataset by examining its dimensions. This involves employing the dim() function, which will return the number of rows, which represent the observations, and columns, which indicate the variables. I will then use tail() to ensure this information is accurate.
+
+```{r, message=F, warning=F}
+#setwd("/Users/Trade/Desktop/Math 5310/Lecture Note/Lecture 16 - Final Project")
+data <- read.csv("ozone-data2.csv", header = T)
+dim(data)  #Check the dimension of the data
+tail(data) #Showing the last few lines of the data
+#str(data)
+```
+
+The dimensions reveals that the dataset consist of 973 rows (observations) and 14 columns (features). While all the predictor variables contain continuous numerical data, the target variable "Class" is a categorical variable. 
+
+# Data Preparation
+After importing the data into R, the next step involves:
+
+1. **Data Inspection:** I will conduct a thorough examination of the dataset, reviewing the data types and checking for any missing values or outliers that could affect the accuracy of the model. If missing values are discovered, I can use either imputation techniques or deletion to address them. 
+
+2. **Exploratory Data Analysis:** Before using this data to train a model, I must first verify the balance of the dataset to avoid bias in the model's performance. I will check for and fix any imbalance in the data distribution by inspecting the frequency distribution of the target variable. In addition to checking for balance, I will also study any associations between target and other attributes.
+
+3. **Data Partitioning:** The dataset will be randomly divided into a training set and a test set using a 2:1 ratio. This approach is to ensure a effective training process and reliable evaluation. An input feature matrix will be created from the training and test data. 
+
+## Data Inspection
+Here, I checked the data type and for missing values. 
+
+```{r, message=F, warning=F}
+vnames <- colnames(data) 
+n <- nrow(data)
+out <- NULL
+for (j in 1:ncol(data)) {
+  vname <- colnames(data)[j]
+  x <- as.vector(data[,j])
+  n1 <- sum(is.na(x), na.rm=TRUE) 
+  n2 <- sum(x=="NA", na.rm=TRUE) 
+  n3 <- sum(x==" ", na.rm=TRUE) 
+  nmiss <- n1 + n2 + n3
+  #miss.perc <- nmiss/n
+  if(mode(x) == "numeric" && length(unique(x)) == 2) {
+    datatype <- "categorical"
+  } else if(mode(x) == "numeric" && any(x %% 1 != 0)) {
+    datatype <- "continuous"
+  } else if(mode(x) == "numeric") {
+    datatype <- "integer"
+  } else {
+    datatype <- mode(x)
+  }
+  ncomplete <- n-nmiss
+  out <- rbind(out, c(features = vname, data.type = datatype, unique.no = length(unique(x)), total.count = ncomplete, missing.count = nmiss ))
+}
+out <- as.data.frame(out)
+row.names(out) <- NULL
+out
+
+## To visualize any missing data
+gg_miss_var(data)
+
+```
+
+From the above results, it is evident that my dataset contains no missing values. Also all the predictor features are numerical except the response variable "Ozone" that is Categorical containing only two classes, which was expected.  
+
+## Exploratory Data Analysis
+Here I perform some exploratory data analysis.
+
+### Inspecting the Frequency Distribution of the Target Variable
+```{r, message=F, warning=F}
+## Frequency distribution of the target variable
+freq_table <- table(data$Ozone)
+freq_df <- as.data.frame(freq_table)
+names(freq_df) <- c("Ozone_Level", "Count")
+## Where 0 represents 'Low Ozone' and 1 represents 'High Ozone'
+freq_df$Ozone_Level <- ifelse(freq_df$Ozone_Level == 0, 'Low Ozone', 'High Ozone')
+
+## Proportion
+freq_df$Proportion <- (freq_df$Count / sum(freq_df$Count)) * 100
+freq_df
+
+## Visual Distribution
+bp <- barplot(prop.table(freq_table), main = "Proportion of Ozone Levels", 
+        ylab = "Proportion", xlab = "Ozone Level")
+labels <- c("Low Ozone", "High Ozone")
+text(x = bp, y = -0.03, labels = labels, srt = 0, adj = 0.5, xpd = T, cex = 1)
+text(x = bp, y=prop.table(freq_table), labels=round(prop.table(freq_table), 4) 
+     *100, pos = 1, cex = 1.2)
+```
+
+The result shows that out of the total observations, approximately 61.66% are categorized as 'Low Ozone' days, and 38.34% are 'High Ozone' days. This distribution provides a baseline understanding of the balance in the dataset, which is essential for further analysis and model training. Ideally, there would be an even split between low and high ozone, but this distribution still allows for a reliable model to be made.
+
+### Inspecting the associations between target and other attributes
+```{r, message=F, warning=F}
+## calculate correlation for all predictor variables with the target variable
+correlation_results <- sapply(data[, sapply(data, is.numeric)], 
+                        function(x) cor(x, data$Ozone, use = "complete.obs"))
+correlation_results
+```
+
+\ 
+
+The correlation analysis of the dataset reveals that higher temperatures and solar radiation positively correlate with ozone levels, suggesting that warmer conditions are conducive to higher ozone. Conversely, increased wind speeds and humidity are linked to lower ozone levels. Notably, pollutants such as Nitric Oxide, Nitrogen Dioxide, and Oxides of Nitrogen are inversely correlated with ozone, indicating a decrease in ozone levels with rising concentrations of these pollutants. Similarly, factors like Wind Speed, Resultant Wind Speed, Resultant Wind Direction, and Maximum Wind Gust are negatively correlated with ozone, reinforcing the trend of lower ozone levels under conditions of stronger winds. Additionally, Dew Point Temperature and Relative Humidity are also negatively associated with ozone, further underscoring the trend of lower ozone levels in more humid conditions.
+
+
+\ 
+
+```{r, message=F, warning=F}
+## Box Plot of the target variable and other attributes
+## Box Plot of Ozone and MaximumWindGust
+ggplot(data, aes(x = factor(Ozone), y = MaximumWindGust)) + geom_boxplot() +
+    labs(x = "Ozone Level", y = "MaximumWindGust") + theme_minimal()
+
+## Box Plot of Ozone and RelativeHumidity
+ggplot(data, aes(x = factor(Ozone), y = RelativeHumidity)) + geom_boxplot() +
+    labs(x = "Ozone Level", y = "RelativeHumidity") + theme_minimal()
+
+## Box Plot of Ozone and OutdoorTemperature
+ggplot(data, aes(x = factor(Ozone), y = OutdoorTemperature)) + geom_boxplot() +
+    labs(x = "Ozone Level", y = "OutdoorTemperature") + theme_minimal()
+
+## Box Plot of Ozone and SolarRadiation
+ggplot(data, aes(x = factor(Ozone), y = SolarRadiation)) + geom_boxplot() +
+    labs(x = "Ozone Level", y = "SolarRadiation") + theme_minimal()
+```
+
+\ 
+
+
+The box plots reveal a distinct pattern in environmental variables relative to ozone levels. On days classified as having low ozone, there are notably higher wind gusts and wind speeds, suggesting that wind plays a role in dispersing or mitigating ozone. In contrast, high ozone days feature lower wind gusts and reduced wind speeds. Furthermore, these low ozone days exhibit a greater range and median of relative humidity, hinting at an inverse relationship with ozone concentration. On the other hand, high ozone days are characterized by elevated temperatures and solar radiation, indicating a direct correlation with increased ozone levels, which aligns with the findings from the correlation analysis. 
+
+I also observed some distinct outliers in both low and high ozone layers for NitricOxide, MaximumWindGust, NitrogenDioxide, OxidesofNitrogen, WindSpeed, ResultantWindSpeed, Std.Dev.WindDirection, DewPointTemperature and PM10.
+
+\newpage
+```{r, message=F, warning=F}
+## Scatter plot of the target variable and other attributes
+ggplot(data, aes(x = OutdoorTemperature, y = RelativeHumidity, 
+         color = factor(Ozone))) + geom_point() + labs(x = "OutdoorTemperature",
+            y = "RelativeHumidity", color = "Ozone Level") + theme_minimal()
+```
+
+\ 
+
+The first scatter plots shows that there is a trend showing that as outdoor temperature increases, relative humidity decreases. This trend is more pronounced on days with high ozone levels, suggesting that warmer, drier conditions may be conducive to higher ozone concentrations. 
+\newpage
+```{r, message=F, warning=F}
+ggplot(data, aes(x = SolarRadiation, y = WindSpeed, 
+         color = factor(Ozone))) + geom_point() + labs(x = "SolarRadiation",
+            y = "WindSpeed", color = "Ozone Level") + theme_minimal()
+
+```
+
+\ 
+
+The second plot suggests a cluster of lower wind speeds associated with higher solar radiation on high ozone days, with the highest concentration of these points being where solar radiation is high. This could indicate that still conditions combined with strong solar radiation are favorable for the formation of ozone. 
+\newpage
+```{r, message=F, warning=F}
+ggplot(data, aes(x = Std.Dev.WindDirection, y = NitricOxide , 
+         color = factor(Ozone))) + geom_point() + labs(x = "Std.Dev.WindDirection",
+            y = "NitricOxide ", color = "Ozone Level") + theme_minimal()
+
+```
+
+\ 
+
+Lastly, high ozone levels appear to coincide with lower and more stable concentrations of nitric oxide, which is less dispersed on days with less variability in wind direction.
+
+\ 
+
+In conclusion, the Exploratory Data Analysis indicates that ozone levels have a positive association with higher temperatures and solar radiation, suggesting that warm, sunny conditions may raise ozone concentrations. Conversely, increased wind speeds, wind gusts, and humidity are generally associated with lower ozone levels, implying that these factors have a mitigating effect on ozone. Furthermore, the presence of pollutants like Nitric Oxide and Nitrogen Dioxide is inversely related to ozone levels. Visual data analysis through scatter plots also supports these findings, showing higher ozone levels on days with lower humidity and wind speeds but increased temperatures and solar radiation, which reinforces the relationship between weather conditions and ozone concentration.
+
+
+## Data Partitioning 
+I randomly split the data into the training set **train** and the test set **test** with a ratio of 2:1 in sample size.
+
+```{r, message=F, warning=F}
+set.seed(123)
+n <- nrow(data)
+split_data <- sample(x=1:2, size = n, replace=TRUE, prob=c(0.67, 0.33))
+train <- data[split_data == 1, ]
+test <- data[split_data == 2, ]
+y.train <- train$Ozone
+yobs <- test$Ozone
+```
+
+## Model Matrix Function
+```{r, message=F, warning=F}
+## Creating a input feature matrix from train data
+## Trim off the first column and leaving only the predictors
+formula0 <- factor(Ozone)~.
+X.train <- model.matrix (as.formula(formula0), data = train)[, -1] 
+#head(X.train)
+
+## Creating a input feature matrix from test data
+X.test <- model.matrix (as.formula(formula0), data = test)[, -1] 
+#head(X.test)
+```
+
+Finally I are ready to begin modelling, I have the predictor attributes for the Training data labelled as "X.train" and the predicted variable labelled as "y.train" and the same for the test data labelled "X.test" and "yobs" respectively. 
+
+# Logistic Regression
+In the modeling phase of this project, I applied a regularized logistic regression model to the training data, utilizing the Elastic Net method. This method is chosen for its proficiency in managing correlated predictors while also selecting relevant features. I carefully calibrate the tuning parameter and displayed the coefficients of the model. Finally, I test the model's performance by predicting the Ozone on the test dataset. This step evaluates the model's ability to effectively identify Ozone levels.
+
+## Fitting Regularized Logistic Regression (Elastic Net) on Training Data
+```{r, message=F, warning=F}
+## Build a Logistic Regression using the Train Data
+## Using cross validation to determine the optimal tuning parameter.
+CV <- cv.glmnet(x=X.train, y=y.train, family="binomial", alpha = 0.5, 
+      nlambda = 200, standardize = T, thresh = 1e-08, nfolds=6, maxit=10000)
+
+plot(CV)
+
+CV$lambda.min
+CV$lambda.1se
+
+# Using lambda that gives the most regularized model within 1sd of minimum error
+b.lambda <- CV$lambda.1se
+```
+
+I chose an alpha value of **0.5**, which is a mix of lasso and ridge regularization (Elastic Net). As the Lambda value increases, the MSE initially reaches a minimum and then starts to increase as the lambda values increase, and the model becomes too simple. The optimal value of lambda that minimizes the cross-validation error is **0.0002155779**, but the lambda value that provides the most regularized model and still yields a minimum error (within 1 standard deviation away from the minimum) is **0.007265114**.
+
+```{r, message=F, warning=F}
+#Fit the best model using obtained lambda
+Best_Model <- glmnet(x=X.train, y=y.train, family="binomial", alpha = 0.5, 
+              lambda=b.lambda, standardize = T, thresh = 1e-07, maxit=1000)
+```
+
+The final model is fit using the best tuning parameter **0.007265114**, which is the lambda value that represents the most regularized model within one standard deviation of the minimum error.
+
+## Print the coefficients of the model.
+```{r, message=F, warning=F}
+#Print out the coefficient of the Model
+(Best_Model$beta)
+```
+
+It appears the coefficients of MaximumWindGust is shrunk towards zero. The non-zero coefficients are considered significant in this model and the coefficients that go to zero are less significant to the data. The coefficients for SolarRadiation, NitricOxide, ResultantWindSpeed and WindSpeed are the largest, suggesting they have a strong relationship with the response variable Class.
+
+## Applying the logistic model to the test data.
+
+Here, I utilized the best model to make predictions on the test data.
+
+```{r, message=F, warning=F}
+# Predicting the Test data
+pred <- predict(Best_Model, newx = X.test, s=b.lambda, type="response") 
+dim(pred)
+pred<-pred[, 1]
+```
+The dimensions of the prediction are printed, showing that there are predictions for 318 test cases.
+
+## Model Evaluation
+### Mean Square Error
+```{r, message=F, warning=F}
+# Calculating MSE
+MSE.a <- mean((yobs-pred)^2)
+MSE.a
+```
+
+The Mean Squared Error (MSE) is calculated as **0.0988** using the predicted probabilities and the observed values (yobs). This metric measures the average squared difference between the predicted values and the actual value. Although this value is quite low, which might initially seem to indicate good model performance, it's important to remember that MSE in isolation might not always be the best metric to evaluate a model, especially for a classification problem where outcomes are categorical.
+
+### Misclassification Rate
+```{r, message=F, warning=F}
+# Finding missclassification rate
+pred1 <- ifelse(pred>0.5, 1, 0)
+(miss.rate <- mean(yobs != pred1))
+```
+
+The misclassification rate is calculated at **0.142**, which measures the proportion of incorrectly predicted instances when the probability threshold is 0.5 to make a binary decision. In other words, about 14.15% of the model's predictions were incorrect. This is a relatively low rate, suggesting that the model is quite accurate in its predictions. 
+
+While both the MSE and the misclassification rate suggest that the model performs well, I also check the ROC curve and Confusion Matrix.
+
+### ROC Curve
+```{r, message=F, warning=F}
+#Plotting ROC curve of the fit.best model.
+AUC <-ci.cvAUC(predictions=pred, labels=yobs, folds=1:NROW(test), confidence=0.95)
+AUC
+
+auc.AUC <- round(AUC$cvAUC, digits = 3) #Area Under the Curve 
+auc.se <- round(AUC$se, digits = 3) #Standard Error
+auc.conf <- round(AUC$confidence, digits = 2) #Confidence Level
+auc.ci <- round(AUC$ci, digits = 3) #Confidence interval
+
+mod.glm <- verify(obs = yobs, pred = pred, baseline = NULL)
+roc.plot(mod.glm, plot.thres=NULL)
+text(x=0.5, y=0.05, paste("Area under ROC = ", auc.AUC, "with 95% CI (",
+               auc.ci[1], ",", auc.ci[2], ")", sep = " "), col="red", cex =1.0)
+
+```
+
+This display shows the Area Under the Curve (AUC) for a ROC curve. The AUC measures the model's ability to discriminate between the two classes: High Level or Low Level. An AUC of approximately 0.94 is considered very good, indicating that the model has a high ability to distinguish between days with High Level Ozone and Low Level Ozone. With 95% confidence, the true AUC is estimated to be between approximately 0.911 and 0.963. The narrow range of this interval further suggests a high level of precision in the AUC estimate.
+
+### Confusion Matrix
+```{r, message=F, warning=F}
+## Confusion matrix
+confusionMatrix( as.factor(pred1),as.factor(yobs),positive = "1")
+#precision(as.factor(yobs),as.factor(pred1))
+#recall(as.factor(yobs), as.factor(pred1))
+```
+
+Confusion Matrix Results:
+
+- 174 True Negatives (TN): The model correctly predicted low ozone (0) 174 times.
+- 14 False Negatives (FN): The model incorrectly predicted low ozone (0) when it was actually high ozone (1) 14 times.
+- 31 False Positives (FP): The model incorrectly predicted high ozone (1) when it was actually low ozone (0) 31 times.
+- 99 True Positives (TP): The model correctly predicted high ozone (1) 99 times.
+
+Accuracy: 85.85% - The model's predictions are correct 85.85% of the time.
+
+Sensitivity (Recall): 87.61% - The model correctly identifies 87.61% of actual high ozone days.
+
+Specificity: 84.88% - The model correctly identifies 84.88% of actual low ozone days.
+
+Positive Predictive Value (Precision): 76.15% - When the model predicts high ozone, it is correct 76.15% of the time.
+
+Negative Predictive Value: 92.55% - When the model predicts low ozone, it is correct 92.55% of the time.
+
+Prevalence: 35.53% - The proportion of actual high ozone days in the dataset.
+
+Detection Rate: 31.13% - The proportion of actual high ozone days correctly identified by the model.
+
+Detection Prevalence: 40.88% - The proportion of cases predicted as high ozone by the model.
+
+
+# Artificial Neural Network Model
+
+In the second modeling phase of this project, I applied the artificial neural network to the training data. I decide to use *2* hidden layers and *4* and *3* neurons in the first and second layer respectively to give a high accuracy. I carefully selected the tuning parameters and displayed the visualization for the model. Finally, I tested the model's performance by predicting the Ozone on the test dataset. This step evaluates the model's ability to effectively identify Ozone levels.
+
+## Fitting Artificial Neural Network on Training Data
+```{r, message=F, warning=F}
+set.seed(12)
+## Building a Artificial Neural Network Model using the Train Data
+## Fit an ANN model to the training dataset 
+nnet <- neuralnet(Ozone~., 
+                  data=train, 
+                  hidden=c( 4, 3),      # No of neurons in the two hidden layers
+                  act.fct='logistic',   # Activation function
+                  err.fct="ce",         # Error function
+                  linear.output=FALSE,  # Indicates a classification problem
+                  likelihood=TRUE,      # Calculate likelihood
+                  learningrate=0.01,    # Learning rate
+                  algorithm="backprop", # Algorithm for training (Standard backpropagation)
+                  stepmax=200000,       # Maximum number of steps (epochs)
+                  rep=1,                # Number of times the network is trained with different initial weights
+                  threshold=0.01,       # Threshold for partial derivatives of the error function as stopping criteria
+                 )
+
+# Plot the neural network
+plot(nnet, rep="best", show.weights=TRUE, dimension=7, information=FALSE, radius=.2,
+     col.hidden="red", col.hidden.synapse="black", lwd=0.8, fontsize=9)
+
+```
+
+## Tuning parameters
+Here I used multiple hyperparameter which includes:
+
+1. The number of hidden layers *(hidden=c( 4, 3))*. Here I used 2 hidden layers. 
+2. The number of neurons in each hidden layer *(hidden=c( 4, 3))*. Here I used 6 in the first layer and 4 in the second layer. 
+3. The activation function *(act.fct='logistic')*. Here I used logistic sigmoid function, which is typical for binary classification tasks like this. Other are:
+    -   "tanh" The hyperbolic tangent function.
+    -   "relu" The rectified linear activation function.
+    -   "softplus" A smooth approximation to the ReLU function.
+4. The error function *(err.fct="ce")*. Here I used cross-entropy, which is appropriate for a binary outcome like this. Others are:
+    -   "sse": Sum of squared errors.
+    -   "mse": Mean squared error.
+    -   "mae": Mean absolute error.
+5.  The output is linear or not *(linear.output=FALSE)*. Here I used false, which indicates that the output is treated as a classification rather than a regression problem. 
+6. The inclusion of likelihood calculation *(likelihood=TRUE)*. Here I used true, which implies that the model fitting includes the calculation of the likelihood of the data given the model.
+7. The learning rate *(learningrate=0.01)*. Here I used 0.01, which specifies the rate at which the model learns.
+8. The training algorithm *(algorithm="backprop")*. Here I used the Standard backpropagation. Others are:
+    -   "rprop+": Resilient backpropagation with weight backtracking.
+    -   "rprop": Resilient backpropagation without weight backtracking.
+    -   "slr":  Scaled conjugate gradient descent.
+9. The max training step/epoch *(stepmax=200000)*: Here I used 200000, which sets the maximum number of training steps and can be used as a stopping criteria for the model training.
+10. Others are *(rep=1)*: which is the number of times the network is trained with different initial weights and *(threshold=0.01)* which is used as a stopping criteria as threshold for partial derivatives of the error function. 
+
+## Applying the Artificial Neural Network model to the test data.
+
+Here, I utilized the ANN model to make predictions on the test data.
+
+```{r, message=F, warning=F}
+# Predicting the Test data
+ypred <- compute(nnet, covariate=X.test)$net.result
+dim(ypred)
+ypred <- ypred[, 1]
+```
+The dimensions of the prediction are printed, showing that there are predictions for 318 test cases.
+
+## Model Evaluation
+### Mean Square Error
+```{r, message=F, warning=F}
+# Calculating MSE
+MSE.b <- mean((yobs-ypred)^2)
+MSE.b
+```
+
+The Mean Squared Error (MSE) is calculated as **0.231** using the predicted probabilities and the observed values (yobs). This metric measures the average squared difference between the predicted values and the actual value. Although this value is quite low, which might initially seem to indicate good model performance, it's important to remember that MSE in isolation might not always be the best metric to evaluate a model, especially for a classification problem where outcomes are categorical.
+
+### Misclassification Rate
+```{r, message=F, warning=F}
+# Finding missclassification rate
+ypred1 <- ifelse(ypred>0.5, 1, 0)
+(miss.rate <- mean(yobs != ypred1))
+
+```
+
+The misclassification rate is calculated at **0.355**, which measures the proportion of incorrectly predicted instances when the probability threshold is 0.5 to make a binary decision. In other words, about 14.15% of the model's predictions were incorrect. This is a relatively low rate, suggesting that the model is quite accurate in its predictions. 
+
+While both the MSE and the misclassification rate suggest that the model performs well, I also check the ROC curve and Confusion Matrix
+
+### ROC Curve
+```{r, message=F, warning=F}
+#Plotting ROC curve of the fit.best model.
+AUC <-ci.cvAUC(predictions=ypred, labels=yobs, folds=1:NROW(test), confidence=0.95)
+AUC
+
+auc.AUC <- round(AUC$cvAUC, digits = 3) #Area Under the Curve 
+auc.se <- round(AUC$se, digits = 3) #Standard Error
+auc.conf <- round(AUC$confidence, digits = 2) #Confidence Level
+auc.ci <- round(AUC$ci, digits = 3) #Confidence interval
+
+mod.glm <- verify(obs = yobs, pred = ypred, baseline = NULL)
+roc.plot(mod.glm, plot.thres=NULL)
+text(x=0.5, y=0.05, paste("Area under ROC = ", auc.AUC, "with 95% CI (",
+               auc.ci[1], ",", auc.ci[2], ")", sep = " "), col="red", cex =1.0)
+
+```
+
+This analysis presents the Area Under the Curve (AUC) for a ROC curve, which evaluates the model's ability to distinguish between two classes: High Level and Low Level Ozone. In this case, the AUC of approximately 0.508 suggests that the model performs only slightly better than random chance in discriminating between days with High Level and Low Level Ozone. The 95% confidence interval for the true AUC, ranging from approximately 0.394 to 0.622, indicates a moderate level of uncertainty in this estimate. While the interval is relatively narrow, the AUC value itself does not reflect a high level of predictive accuracy.
+
+### Confusion Matrix
+```{r, message=F, warning=F}
+## Confusion matrix
+confusionMatrix( as.factor(ypred1),as.factor(yobs),positive = "1")
+#precision(as.factor(yobs),as.factor(pred1))
+#recall(as.factor(yobs), as.factor(pred1))
+```
+
+Confusion Matrix:
+
+- 205 True Negatives (TN): The model correctly predicted low ozone (0) 205 times.
+- 113 False Negatives (FN): The model incorrectly predicted low ozone (0) when it was actually high ozone (1) 113 times.
+- 0 False Positives (FP): The model did not incorrectly predict high ozone (1) when it was actually low ozone (0).
+- 0 True Positives (TP): The model did not correctly predict high ozone (1) at all.
+
+Accuracy: 64.5% - The model's predictions are correct 64.5% of the time.
+
+Sensitivity (Recall): 0% - The model failed to correctly identify any actual high ozone days.
+
+Specificity: 100% - The model correctly identifies all actual low ozone days.
+
+Positive Predictive Value (Precision): Not Applicable (NaN) - The model made no predictions for high ozone (1), so precision cannot be calculated.
+
+Negative Predictive Value: 64.5% - When the model predicts low ozone, it is correct 64.5% of the time.
+
+Prevalence: 35.5% - The proportion of actual high ozone days in the dataset.
+
+Detection Rate: 0% - The proportion of actual high ozone days correctly identified by the model is zero.
+
+Detection Prevalence: 0% - The proportion of cases predicted as high ozone by the model is zero.
+
+# Comparison
+Between the Logistic Regression and Artificial Neural Network (ANN) models applied to the dataset, the Logistic Regression model appears to be more effective. This conclusion is drawn based on several performance metrics:
+
+1. **Mean Squared Error (MSE):**
+   - Logistic Regression: MSE is 0.0988.
+   - ANN: MSE is significantly higher at 0.231.
+
+   The lower MSE in the Logistic Regression model indicates better prediction accuracy.
+
+2. **Missclassification Rate:**
+   - Logistic Regression: The missclassification rate is 14.2%.
+   - ANN: The missclassification rate is notably higher at 35.5%.
+
+   This again favors the Logistic Regression model, as it has a lower rate of incorrectly classified observations.
+
+3. **Area Under the ROC Curve (AUC):**
+   - Logistic Regression: The AUC is 0.937, with a 95% confidence interval ranging from 0.911 to 0.963.
+   - ANN: The AUC is only 0.508, with a much broader 95% confidence interval from 0.394 to 0.622.
+
+   The higher AUC for the Logistic Regression model implies superior ability to discriminate between High and Low Ozone levels. The AUC near 0.5 for the ANN model suggests it performs no better than random guessing.
+
+4. **Accuracy and Other Metrics:**
+   - Logistic Regression: Shows good accuracy at 85.8% with a balanced accuracy of 86.2%, a good sensitivity (87.6%), and specificity (84.9%).
+   - ANN: Shows lower accuracy at 64.5%, with a balanced accuracy of only 50%, and an extremely low sensitivity (0%), indicating it failed to correctly identify any high ozone days.
+
+Considering these metrics, the Logistic Regression model not only shows better performance in terms of accuracy, sensitivity, and specificity, but also demonstrates a much higher capability in distinguishing between the two classes (High and Low Ozone levels) compared to the ANN model. The Logistic Regression model likely performed better than the Artificial Neural Network (ANN) because the dataset used in this study was relatively straightforward. ANNs are powerful for complex and large datasets, but they can be too intricate for simpler data, leading to overfitting where the model learns the noise rather than the actual pattern. On the other hand, Logistic Regression, being simpler and more direct, is often more suitable for less complex tasks like this one. It's more efficient, easier to understand, and does well with clear, linear relationships, which is probably why it excelled in this case. Essentially, the dataset didn't need the complexity of an ANN, making Logistic Regression a better fit. It is also possible that my ANN might have performed better if I had increased the number of reps.
+
+
+
+# Factors influencing the choice of layers and neurons in the ANN and preventing overfitting
+
+1. **Factors Influencing the Design of ANN:**
+
+- Complexity of Data: The dataset had 14 features and relatively straightforward relationships, so a small ANN with two hidden layers and fewer neurons was sufficient.
+- Dataset Size: With 973 rows, overly complex models (more layers and neurons) could overfit due to limited data.
+- Nature of the Problem: Since this was a binary classification problem, logistic activation functions and a straightforward structure worked effectively.
+- Experimentation: The chosen structure (two layers with 4 and 3 neurons) was likely selected after testing various configurations for optimal performance.
+
+2. **Preventing Overfitting:**
+
+- Regularization
+- Validation Split
+- Early Stopping
+- Simpler Model
+
+# Confusion Matrix Components and Sensitivity vs. Specificity for Classifying High/Low Ozone Days:
+
+**Confusion Matrix Components:**
+
+- True Positives (TP): 99
+- False Negatives (FN): 14
+- True Negatives (TN): 174
+- False Positives (FP): 31
+
+**Importance of Sensitivity Over Specificity:**
+
+- Sensitivity (Recall): Measures the ability to identify actual high ozone days. It is crucial as high ozone levels can have severe health and environmental impacts, and missing these days (false negatives) could have significant consequences.
+- Specificity: Measures the ability to correctly identify low ozone days. While important, misclassifying a low ozone day as high (false positives) has less severe consequences compared to missing high ozone days.
+
+In the context of environmental health, minimizing false negatives (failing to detect high ozone days) is more critical, making sensitivity a higher priority than specificity.
+
+
+
+
+# Conclusion
+In conclusion, this project successfully applied Logistic Regression and Artificial Neural Network (ANN) models to classify ozone levels in El Paso, using historical air pollutant and meteorological data. The comparative analysis revealed that Logistic Regression outperformed the ANN, likely due to the dataset's relative simplicity and size, which didn't require the complexity of an ANN. Logistic Regression demonstrated higher accuracy, better predictive capability, and was more efficient for this particular dataset. This study underscores the importance of choosing an appropriate modeling technique based on the data's characteristics, highlighting that simpler models can often be more effective for less complex datasets.
